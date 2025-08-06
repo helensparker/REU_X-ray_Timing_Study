@@ -1,0 +1,183 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+from scipy import integrate
+
+from astropy.visualization import time_support
+
+from sunpy import timeseries as ts
+from sunpy.net import Fido
+from sunpy.net import attrs as a
+
+from math import *
+from pprint import pprint
+from datetime import timedelta
+from astropy.table import QTable
+from stixdcpy.quicklook import LightCurves
+from stixdcpy.energylut import EnergyLUT
+from stixdcpy import auxiliary as aux
+from stixdcpy.net import FitsQuery as fq
+from stixdcpy.net import Request as jreq
+from stixdcpy import instrument as inst
+from stixdcpy.science import PixelData, Spectrogram, spec_fits_crop, spec_fits_concatenate, fits_time_to_datetime
+from stixdcpy.housekeeping import Housekeeping
+from astropy.io import fits
+from stixdcpy import detector_view as dv
+from stixdcpy import spectrogram  as cspec
+from stixdcpy.imgspec import ImgSpecArchive as isar
+from datetime import datetime
+import csv
+
+df = pd.read_csv('LTCFixLowFlaresRemoveuselesspeaktimesandVals.csv')
+
+def getIntegral(c, dsfakestart, dsstart, dgend):
+    valueslist = []
+    timeslist = []
+    inttimelist = []
+    for k in range(len(lc.data['counts'][c])):
+        val = lc.data['counts'][c][k]
+        if dsfakestart + timedelta(0,lc.data['delta_time'][k]) > dgend:
+            break
+        if not dsfakestart + timedelta(0,lc.data['delta_time'][k]) < dsstart:
+            valueslist.append(val)
+            timeslist.append(dsfakestart + timedelta(0,lc.data['delta_time'][k]))
+            inttimelist.append(lc.data['delta_time'][k])
+    integral = integrate.cumulative_trapezoid(valueslist, inttimelist, initial=0)
+    return [timeslist, integral]
+
+def smoothCurve(c,dsfakestart,dgend,background,peak):
+    valueslist = []
+    timeslist = []
+    inttimelist = []
+    for k in range(len(lc.data['counts'][c])):
+        val = lc.data['counts'][c][k]
+        if dsfakestart + timedelta(0,lc.data['delta_time'][k]) > dgend:
+            break
+        #if not dsfakestart + timedelta(0,lc.data['delta_time'][k]) < dsstart:
+        else:
+            valueslist.append(val)#-background)
+            timeslist.append(dsfakestart + timedelta(0,lc.data['delta_time'][k]))
+            inttimelist.append(lc.data['delta_time'][k])
+    '''avgValList = [(valueslist[0]+valueslist[1])/2]
+    for i in range(1,len(valueslist)-1):
+        if peak == 0:
+            avgValList.append(1)
+        else:
+            avgValList.append((valueslist[i-1]+valueslist[i]+valueslist[i+1])/3)
+    avgValList.append((valueslist[-1]+valueslist[-2])/2)'''
+
+    smoothedVals = np.convolve(valueslist,np.ones(15)/15,mode='same')
+
+
+    return [timeslist, smoothedVals]
+
+def findPeak(timeslist,smoothedVals):
+    max = 0
+    times = 0
+    for i in range(len(smoothedVals)):
+        if smoothedVals[i] > max:
+            max = smoothedVals[i]
+            times = timeslist[i]
+    return max, times
+
+
+
+
+index = 3928
+distance = 4381
+with open('LTCMorePeaksFixLowFlaresRemoveuselesspeaktimesandVals.csv', 'a', newline='') as file :
+    writer = csv.writer(file)
+    for i in tqdm(range(index,index+distance)):
+        start = df.iloc[i,0]
+        end = df.iloc[i,1]
+
+        for j in range(16,4,-1):
+            result_goes = Fido.search(a.Time(start, end), a.Instrument("XRS"), a.goes.SatelliteNumber(j), a.Resolution("flx1s"))
+            coolFile = Fido.fetch(result_goes)
+            goes = ts.TimeSeries(coolFile)
+            if not type(goes) is list:
+                dgstart = datetime.strptime(start, "%Y-%m-%d %H:%M:%S.%f")
+                dgend = datetime.strptime(end, "%Y-%m-%d %H:%M:%S.%f")
+                sstart = start
+                send = end
+                lc = LightCurves.from_sdc(start_utc=sstart, end_utc=send, ltc=True)
+                #ax1 = lc.peek()
+                dsfakestart = datetime.strptime(lc.data['start_utc'], "%Y-%m-%dT%H:%M:%S.%f")
+
+                smooth0 = smoothCurve(0,dsfakestart,dgend,df.iloc[i,14],df.iloc[i,5])
+                smooth1 = smoothCurve(1,dsfakestart,dgend,df.iloc[i,15],df.iloc[i,7])
+                smooth2 = smoothCurve(2,dsfakestart,dgend,df.iloc[i,16],df.iloc[i,9])
+                smooth3 = smoothCurve(3,dsfakestart,dgend,df.iloc[i,17],df.iloc[i,11])
+                smooth4 = smoothCurve(4,dsfakestart,dgend,df.iloc[i,18],df.iloc[i,13])
+
+                peak0, time0 = findPeak(smooth0[0],smooth0[1])
+                peak1, time1 = findPeak(smooth1[0],smooth1[1])
+                peak2, time2 = findPeak(smooth2[0],smooth2[1])
+                peak3, time3 = findPeak(smooth3[0],smooth3[1])
+                peak4, time4 = findPeak(smooth4[0],smooth4[1])
+
+                realRow = df.iloc[i].tolist()
+                realRow.extend([time0, peak0, time1, peak1, time2, peak2, time3, peak3, time4, peak4])
+
+
+                writer.writerow(realRow)
+
+
+                break
+
+                print(peak0, df.iloc[i,5])
+                print(peak0/df.iloc[i,5])
+                print(time0, df.iloc[i,4])
+
+                print(peak1, df.iloc[i,7])
+                print(peak1/df.iloc[i,7])
+                print(time1, df.iloc[i,6])
+
+                print(peak2, df.iloc[i,9])
+                print(peak2/df.iloc[i,9])
+                print(time2, df.iloc[i,8])
+
+                print(peak3, df.iloc[i,11])
+                print(peak3/df.iloc[i,11])
+                print(time3, df.iloc[i,10])
+
+                print(peak4, df.iloc[i,13])
+                print(peak4/df.iloc[i,13])
+                print(time4, df.iloc[i,12])
+
+                plt.scatter([1,1,2,2,3,3,4,4,5,5],[peak0, df.iloc[i,5], peak1, df.iloc[i,7], peak2, df.iloc[i,9], peak3, df.iloc[i,11], peak4, df.iloc[i,13]])
+                plt.yscale('log')
+                plt.show()
+
+                #plt.plot(hxrfluence0[0],hxrfluence0[1])
+                #plt.plot(hxrfluence1[0],hxrfluence1[1])
+                #plt.plot(hxrfluence2[0],hxrfluence2[1])
+                #plt.plot(hxrfluence3[0],hxrfluence3[1])
+                #plt.plot(hxrfluence4[0],hxrfluence4[1])
+
+
+                fig, ax1 = plt.subplots()
+
+                ax1.plot(smooth0[0],smooth0[1],label = '4-10keV')
+                ax1.plot(smooth1[0],smooth1[1],label = '10-15keV')
+                ax1.plot(smooth2[0],smooth2[1],label = '15-25keV')
+                ax1.plot(smooth3[0],smooth3[1],label = '25-50keV')
+                ax1.plot(smooth4[0],smooth4[1],label = '50-84keV')
+                ax1.legend()
+                ax1.set_ylabel('Counts')
+                ax1.set_yscale('log')
+
+
+                #plt.savefig(f'{i}NeupertEffect{j}.png')
+                ax2 = ax1.twinx()
+                goes.plot(axes=ax2)
+                ax1.get_legend().remove()
+                ax2.get_legend().remove()
+                lines1, labels1 = ax1.get_legend_handles_labels()
+                lines2, labels2 = ax2.get_legend_handles_labels()
+                ax2.legend(lines1 + lines2, labels1 + labels2)
+                ax2.set_xlim(sstart, send)
+
+                plt.savefig(f'{i}SmoothedjCurves{j}.png')
+                break
